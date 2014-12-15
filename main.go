@@ -18,7 +18,7 @@ import (
 	"github.com/bitly/nsq/nsqd"
 	"github.com/bitly/nsq/util"
 	"github.com/mreiferson/go-options"
-	"github.com/shipwire/consensus"
+	"github.com/shipwire/ansqd/internal/consensus"
 )
 
 var n *nsqd.NSQD

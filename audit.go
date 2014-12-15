@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/bitly/nsq/nsqd"
-	"github.com/shipwire/consensus"
+	"github.com/shipwire/ansqd/internal/consensus"
 )
 
 var ExpirationTime = 2 * time.Minute
