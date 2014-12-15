@@ -15,10 +15,8 @@ type Host struct {
 	buckets                                 map[time.Time]*Bucket
 	nextBucket                              *Bucket
 	recoveryLock, bucketsLock, messagesLock *sync.Mutex
-	messages                                map[nsqd.MessageID]struct {
-		bucket *Bucket
-	}
-	inRecovery bool
+	messages                                map[nsqd.MessageID]*Bucket
+	inRecovery                              bool
 }
 
 func NewHost(hostname string) *Host {
@@ -28,9 +26,7 @@ func NewHost(hostname string) *Host {
 		bucketsLock:  &sync.Mutex{},
 		messagesLock: &sync.Mutex{},
 		recoveryLock: &sync.Mutex{},
-		messages: map[nsqd.MessageID]struct {
-			bucket *Bucket
-		}{},
+		messages:     map[nsqd.MessageID]*Bucket{},
 	}
 	h.nextBucket = h.GetBucketAtExpireTime(time.Now())
 	return h
@@ -41,6 +37,10 @@ type Bucket struct {
 	expiration time.Time
 	next       *Bucket
 	host       *Host
+}
+
+func (b *Bucket) GetMessage(id nsqd.MessageID) nsqd.Message {
+	return b.messages[id]
 }
 
 func (h *Host) GetBucketAtExpireTime(e time.Time) *Bucket {
@@ -88,7 +88,7 @@ func (h *Host) RemoveMessage(m nsqd.Message) {
 	h.messagesLock.Lock()
 	defer h.messagesLock.Unlock()
 	if have, ok := h.messages[m.ID]; ok {
-		delete(have.bucket.messages, m.ID)
+		delete(have.messages, m.ID)
 		delete(h.messages, m.ID)
 	}
 }

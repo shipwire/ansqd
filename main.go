@@ -14,11 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	"bitbucket.org/shipwire/consensus"
 	"github.com/BurntSushi/toml"
 	"github.com/bitly/nsq/nsqd"
 	"github.com/bitly/nsq/util"
 	"github.com/mreiferson/go-options"
+	"github.com/shipwire/consensus"
 )
 
 var n *nsqd.NSQD

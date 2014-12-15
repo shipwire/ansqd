@@ -6,10 +6,11 @@ import (
 	"sync"
 	"time"
 
-	"bitbucket.org/shipwire/consensus"
-
 	"github.com/bitly/nsq/nsqd"
+	"github.com/shipwire/consensus"
 )
+
+var ExpirationTime = 2 * time.Minute
 
 type audit struct {
 	m *nsqd.Message
@@ -23,10 +24,10 @@ func (d *delegate) OnFinish(m *nsqd.Message) {
 }
 
 // OnQueue is called before a message is sent to the queue
-func (d *delegate) OnQueue(m *nsqd.Message) {
+func (d *delegate) OnQueue(m *nsqd.Message, topic string) {
 	n.GetTopic("audit.send").PutMessage(&nsqd.Message{
 		ID:   n.NewID(),
-		Body: m.ID[:],
+		Body: auditMessage{*m, topic}.Bytes(),
 	})
 	log.Printf("AUDIT: OnQueue %x", m.ID)
 }
@@ -44,7 +45,7 @@ type auditor struct {
 }
 
 func (a auditor) Audit(m *nsqd.Message) {
-	a.ExtractHost(m).AddMessage(*m, time.Now().Add(2*time.Minute))
+	a.ExtractHost(m).AddMessage(*m, time.Now().Add(ExpirationTime))
 }
 
 func (a auditor) Fin(m *nsqd.Message) {
@@ -52,11 +53,11 @@ func (a auditor) Fin(m *nsqd.Message) {
 }
 
 func (a auditor) Req(m *nsqd.Message) {
-	a.ExtractHost(m).AddMessage(*m, time.Now().Add(2*time.Minute))
+	a.ExtractHost(m).AddMessage(*m, time.Now().Add(ExpirationTime))
 }
 
 func (a auditor) Touch(m *nsqd.Message) {
-	a.ExtractHost(m).AddMessage(*m, time.Now().Add(2*time.Minute))
+	a.ExtractHost(m).AddMessage(*m, time.Now().Add(ExpirationTime))
 }
 
 func (h *Host) InitiateRecovery() {
@@ -68,6 +69,11 @@ func (h *Host) InitiateRecovery() {
 	h.recoveryLock.Unlock()
 
 	a.c.Do(RecoverLockCommand{h.host})
+	for mid, bucket := range h.messages {
+		m := bucket.GetMessage(mid)
+		am := extractAudit(m)
+		n.GetTopic(am.Topic).PutMessage(&am.Message)
+	}
 }
 
 func (a auditor) ExtractHost(m *nsqd.Message) *Host {
@@ -101,4 +107,17 @@ func (a auditor) GetHost(hostname string) *Host {
 	}
 
 	return host
+}
+
+type auditMessage struct {
+	nsqd.Message
+	Topic string
+}
+
+func (a auditMessage) Bytes() []byte {
+	return nil
+}
+
+func extractAudit(m nsqd.Message) auditMessage {
+	return auditMessage{}
 }
