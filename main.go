@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -17,8 +16,10 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/bitly/nsq/nsqd"
 	"github.com/bitly/nsq/util"
+	"github.com/hashicorp/serf/command/agent"
+	"github.com/hashicorp/serf/serf"
 	"github.com/mreiferson/go-options"
-	"github.com/shipwire/ansqd/internal/consensus"
+	"github.com/shipwire/ansqd/internal/polity"
 )
 
 var n *nsqd.NSQD
@@ -151,14 +152,15 @@ func main() {
 		}
 	}
 
-	s := consensus.New("ansqd", "/tmp/raft", "localhost", 36301)
-	go func() {
-		err := http.ListenAndServe("localhost:36301", s.Handler(""))
+	ag, err := agent.Create(agent.DefaultConfig(), serf.DefaultConfig(), os.Stdout)
+	if err != nil {
 		log.Fatal(err)
-	}()
+	}
 
+	p := polity.CreateWithAgent(ag)
 	a = auditor{
-		s,
+		p,
+		ag,
 		make(map[string]*Host),
 		&sync.Mutex{},
 	}
@@ -170,7 +172,7 @@ func main() {
 	n = nsqd.NewNSQD(opts)
 
 	n.LoadMetadata()
-	err := n.PersistMetadata()
+	err = n.PersistMetadata()
 	if err != nil {
 		log.Fatalf("ERROR: failed to persist metadata - %s", err.Error())
 	}

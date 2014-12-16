@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/bitly/nsq/nsqd"
-	"github.com/shipwire/ansqd/internal/consensus"
+	"github.com/hashicorp/serf/command/agent"
+	"github.com/shipwire/ansqd/internal/polity"
 )
 
 var ExpirationTime = 2 * time.Minute
@@ -20,11 +22,18 @@ type delegate struct{}
 
 // OnFinish is called when FIN is received for the message
 func (d *delegate) OnFinish(m *nsqd.Message) {
+	n.GetTopic("audit.finish").PutMessage(&nsqd.Message{
+		ID:   n.NewID(),
+		Body: m.ID[:],
+	})
 	log.Printf("AUDIT: OnFinish %x", m.ID)
 }
 
 // OnQueue is called before a message is sent to the queue
 func (d *delegate) OnQueue(m *nsqd.Message, topic string) {
+	if strings.HasPrefix(topic, "audit.") {
+		return
+	}
 	n.GetTopic("audit.send").PutMessage(&nsqd.Message{
 		ID:   n.NewID(),
 		Body: auditMessage{*m, topic}.Bytes(),
@@ -33,13 +42,18 @@ func (d *delegate) OnQueue(m *nsqd.Message, topic string) {
 }
 
 // OnRequeue is called when REQ is received for the message
-func (d *delegate) OnRequeue(m *nsqd.Message, delay time.Duration) {}
+func (d *delegate) OnRequeue(m *nsqd.Message, delay time.Duration) {
+	a.Req(m)
+}
 
 // OnTouch is called when TOUCH is received for the message
-func (d *delegate) OnTouch(m *nsqd.Message) {}
+func (d *delegate) OnTouch(m *nsqd.Message) {
+	a.Touch(m)
+}
 
 type auditor struct {
-	c         *consensus.Server
+	p         *polity.Polity
+	ag        *agent.Agent
 	hosts     map[string]*Host
 	hostsLock *sync.Mutex
 }
@@ -68,7 +82,13 @@ func (h *Host) InitiateRecovery() {
 	h.inRecovery = true
 	h.recoveryLock.Unlock()
 
-	a.c.Do(RecoverLockCommand{h.host})
+	role := "recover:" + h.host
+	err := a.p.RunElection(role)
+	if err != nil {
+		a.p.RunRecallElection(role)
+		return
+	}
+
 	for mid, bucket := range h.messages {
 		m := bucket.GetMessage(mid)
 		am := extractAudit(m)
