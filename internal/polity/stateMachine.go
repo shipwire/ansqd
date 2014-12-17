@@ -95,7 +95,7 @@ func (p *Polity) confirmElection(q *serf.Query) {
 	err := q.Respond([]byte{})
 
 	if err != nil {
-		p.logf("%s error confirming election", p.name, err)
+		p.logf("%s: error confirming election: %s", p.name, err)
 	}
 }
 
