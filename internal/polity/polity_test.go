@@ -48,7 +48,7 @@ func TestPolity(t *testing.T) {
 	polities, ag := getAgents(t, 3)
 	joinAgents(t, ag)
 
-	err := polities[0].RunElection("leader")
+	err := <-polities[0].RunElection("leader")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestPolity(t *testing.T) {
 		t.Fatal(polities[0].name, "should be leader. Got", leader)
 	}
 
-	err = polities[1].RunRecallElection("leader")
+	err = <-polities[1].RunRecallElection("leader")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,12 +75,12 @@ func TestChain(t *testing.T) {
 		joinAgents(t, []*agent.Agent{agents[n], agents[n+1]})
 	}
 
-	err := polities[0].RunElection("leader")
+	err := <-polities[0].RunElection("leader")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = polities[1].RunRecallElection("leader")
+	err = <-polities[1].RunRecallElection("leader")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,19 +91,19 @@ func TestPolityWithFailures(t *testing.T) {
 	polities, agents := getAgents(t, 7)
 	joinAgents(t, agents)
 
-	err := polities[0].RunElection("leader")
+	err := <-polities[0].RunElection("leader")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = polities[1].RunRecallElection("leader")
+	err = <-polities[1].RunRecallElection("leader")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	shutdown := rand.Perm(7)[:4]
-	next := shutdown[3]
-	shutdown = shutdown[:3]
+	shutdown := rand.Perm(7)[:2]
+	next := shutdown[1]
+	shutdown = shutdown[:1]
 
 	for _, n := range shutdown {
 		agents[n].Shutdown()
@@ -111,7 +111,7 @@ func TestPolityWithFailures(t *testing.T) {
 		fmt.Println("Shutting down node", polities[n].name)
 	}
 
-	err = polities[next].RunElection("leader")
+	err = <-polities[next].RunElection("leader")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,12 +121,12 @@ func TestLostElection(t *testing.T) {
 	polities, agents := getAgents(t, 7)
 	joinAgents(t, agents)
 
-	err := polities[0].RunElection("leader")
+	err := <-polities[0].RunElection("leader")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = polities[1].RunRecallElection("leader")
+	err = <-polities[1].RunRecallElection("leader")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestLostElection(t *testing.T) {
 		<-agents[n].ShutdownCh()
 	}
 
-	err = polities[next].RunElection("leader")
+	err = <-polities[next].RunElection("leader")
 	if err != ErrLostElection {
 		t.Fatal("Election should have been lost")
 	}

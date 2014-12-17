@@ -46,27 +46,32 @@ const (
 
 // Errors
 var (
+	ErrAborted      = errors.New("election aborted")
 	ErrLostElection = errors.New("lost election")
 	ErrRoleUnfilled = errors.New("cannot recall unfilled role")
 )
 
 // Polity represents a distributed cluster capable of electing nodes for particular roles.
 type Polity struct {
-	name      string
-	s         *serf.Serf
-	eventCh   <-chan serf.Event
-	roles     map[string]role
-	voteMutex *sync.Mutex
-	Log       *log.Logger
+	name              string
+	s                 *serf.Serf
+	eventCh           <-chan serf.Event
+	abortConfirmation <-chan struct{}
+	roles             map[string]role
+	voteMutex         *sync.Mutex
+	Log               *log.Logger
+	QuorumFunc        QuorumFunc
 }
 
 // Create initializes a polity based on a serf instance and event channel.
 func Create(s *serf.Serf, eventCh <-chan serf.Event) *Polity {
 	p := &Polity{
-		s:         s,
-		eventCh:   eventCh,
-		roles:     make(map[string]role),
-		voteMutex: &sync.Mutex{},
+		s:                 s,
+		eventCh:           eventCh,
+		roles:             make(map[string]role),
+		voteMutex:         &sync.Mutex{},
+		abortConfirmation: make(chan struct{}),
+		QuorumFunc:        SimpleMajority,
 	}
 
 	go p.voteLoop()
@@ -76,10 +81,12 @@ func Create(s *serf.Serf, eventCh <-chan serf.Event) *Polity {
 func CreateWithAgent(a *agent.Agent) *Polity {
 	eventCh := make(chan serf.Event, 10)
 	p := &Polity{
-		s:         a.Serf(),
-		eventCh:   eventCh,
-		roles:     make(map[string]role),
-		voteMutex: &sync.Mutex{},
+		s:                 a.Serf(),
+		eventCh:           eventCh,
+		roles:             make(map[string]role),
+		voteMutex:         &sync.Mutex{},
+		abortConfirmation: make(chan struct{}),
+		QuorumFunc:        SimpleMajority,
 	}
 
 	a.RegisterEventHandler(p.agentHandler(eventCh))
@@ -106,16 +113,16 @@ func (p *Polity) Serf() *serf.Serf {
 }
 
 // RunElection initiates an election for role with the local node as the candidate.
-func (p *Polity) RunElection(role string) error {
-	votesRequired := 3
+func (p *Polity) RunElection(role string) <-chan error {
+	votesRequired := p.QuorumFunc(3)
 	yesVotes := 0
 
-	p.logf("%s up for candidacy for role %s", p.name, role)
+	p.logf("%s running for role %s", p.name, role)
 
 	request := fmt.Sprintf("%s %s", p.Serf().LocalMember().Name, role)
-	qr, err := p.s.Query(electionBegin, []byte(request), &serf.QueryParam{Timeout: 60 * time.Second})
+	qr, err := p.s.Query(electionBegin, []byte(request), &serf.QueryParam{Timeout: 15 * time.Second})
 	if err != nil {
-		return err
+		return errChan(err)
 	}
 
 	for rsp := range qr.ResponseCh() {
@@ -128,7 +135,7 @@ func (p *Polity) RunElection(role string) error {
 			continue
 		}
 
-		if newVotesRequired := (population / 2) + 1; newVotesRequired > votesRequired {
+		if newVotesRequired := p.QuorumFunc(population); newVotesRequired > votesRequired {
 			votesRequired = newVotesRequired
 		}
 
@@ -144,28 +151,65 @@ func (p *Polity) RunElection(role string) error {
 	p.logf("Received %d votes. %d required", yesVotes, votesRequired)
 
 	if yesVotes < votesRequired {
-		return ErrLostElection
+		return errChan(ErrLostElection)
 	}
+	return p.runConfirmation(electionConfirm, request, role, votesRequired)
+}
 
-	qr, err = p.s.Query(electionConfirm, []byte(request), nil)
-	if err != nil {
-		return err
-	}
+func (p *Polity) runConfirmation(query, request, role string, votesRequired int) <-chan error {
+	ch := make(chan error)
+	go func() {
+		for {
+		doConfirmation:
+			confirmations := 0
+			qr, err := p.s.Query(query, []byte(request), &serf.QueryParam{Timeout: 1 * time.Minute})
+			if err != nil {
+				ch <- err
+				close(ch)
+				return
+			}
 
-	for _ = range qr.ResponseCh() {
-	}
+			for {
+				select {
+				case <-p.abortConfirmation:
+					ch <- ErrAborted
+					close(ch)
+					return
+				case rsp := <-qr.ResponseCh():
+					confirmations++
+					p.logf("%s confirmed %s", rsp.From, query)
+					if confirmations >= votesRequired {
+						ch <- p.updateRole(role)
+						close(ch)
+						return
+					}
+				case <-time.After(50 * time.Millisecond):
+					if qr.Finished() {
+						goto doConfirmation
+					}
+				}
+			}
+		}
+	}()
 
-	return nil
+	return ch
+}
+
+func errChan(err error) <-chan error {
+	ch := make(chan error, 1)
+	ch <- err
+	close(ch)
+	return ch
 }
 
 // RunRecallElection starts a vote to empty a role.
-func (p *Polity) RunRecallElection(role string) error {
+func (p *Polity) RunRecallElection(role string) <-chan error {
 	votesRequired := 3
 	yesVotes := 0
 
 	qr, err := p.s.Query(recallBegin, []byte(role), &serf.QueryParam{Timeout: 10 * time.Second})
 	if err != nil {
-		return err
+		return errChan(err)
 	}
 
 	for rsp := range qr.ResponseCh() {
@@ -178,7 +222,7 @@ func (p *Polity) RunRecallElection(role string) error {
 			continue
 		}
 
-		if newVotesRequired := (population / 2) + 1; newVotesRequired > votesRequired {
+		if newVotesRequired := p.QuorumFunc(population); newVotesRequired > votesRequired {
 			votesRequired = newVotesRequired
 		}
 
@@ -194,18 +238,10 @@ func (p *Polity) RunRecallElection(role string) error {
 	p.logf("Received %d votes. %d required for recall", yesVotes, votesRequired)
 
 	if yesVotes < votesRequired {
-		return ErrLostElection
+		return errChan(ErrLostElection)
 	}
 
-	qr, err = p.s.Query(recallConfirm, []byte(role), nil)
-	if err != nil {
-		return err
-	}
-
-	for _ = range qr.ResponseCh() {
-	}
-
-	return p.updateRole(role)
+	return p.runConfirmation(recallConfirm, role, role, votesRequired)
 }
 
 func (p *Polity) updateRole(roleString string) error {
@@ -216,71 +252,6 @@ func (p *Polity) updateRole(roleString string) error {
 
 	payload := fmt.Sprintln(r.node, roleString, r.status)
 	return p.s.UserEvent(updateTime, []byte(payload), false)
-}
-
-func (p *Polity) QueryRole(role string) (string, error) {
-	votesRequired := 3
-
-	var (
-		answer       string
-		answerStatus status
-	)
-
-	votes := 0
-	window := &LamportWindow{}
-
-	qr, err := p.s.Query(query, []byte(role), &serf.QueryParam{Timeout: 10 * time.Second})
-	if err != nil {
-		return "", err
-	}
-
-	for rsp := range qr.ResponseCh() {
-		var node string
-		var population int
-		var status status
-		var time serf.LamportTime
-
-		_, err := fmt.Sscanln(string(rsp.Payload), &node, &status, &time, &population)
-		if err != nil {
-			p.logf("query: %s: error parsing response: %s: %s", p.name, err, strconv.Quote(string(rsp.Payload)))
-			continue
-		}
-
-		if newVotesRequired := (population / 2) + 1; newVotesRequired > votesRequired {
-			votesRequired = newVotesRequired
-		}
-
-		if node == "-" {
-			// this response is *really* old. disregard
-			continue
-		}
-
-		if node != answer && window.Before(time) {
-			// this response is old. disregard
-			continue
-		}
-
-		if (status != answerStatus || node != answer) && window.After(time) {
-			// this response is newer than what we knew. use it instead
-			votes = 1
-			window = &LamportWindow{}
-			window.Witness(time)
-			answer = node
-			answerStatus = status
-		}
-
-		if node == answer {
-			// this response is what we know already
-			votes++
-			window.Witness(time)
-		}
-
-		if votes >= votesRequired {
-			return node, nil
-		}
-	}
-
-	return "", ErrLostElection
 }
 
 func (p *Polity) voteLoop() {
@@ -335,16 +306,13 @@ func (p *Polity) updateTime(q serf.UserEvent) {
 	p.voteMutex.Lock()
 	defer p.voteMutex.Unlock()
 
-	if existing, ok := p.roles[r]; ok && existing.node == node && existing.status == status {
+	if existing, ok := p.roles[r]; ok && existing.node == node && existing.status.confirmed(status) {
 		existing.time = q.LTime
+		existing.status = status
 		p.roles[r] = existing
 	} else if !ok {
 		p.roles[r] = role{node: node, status: status, time: q.LTime}
 	}
-}
-
-func (s status) vacant() bool {
-	return !(s == confirmed || s == impeached)
 }
 
 func (p *Polity) logf(f string, i ...interface{}) {
