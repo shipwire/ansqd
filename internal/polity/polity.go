@@ -184,10 +184,15 @@ func (p *Polity) runConfirmation(query, request, role string, votesRequired int)
 						p.logf("%s: %s confirmed %s", p.name, rsp.From, query)
 					}
 
+					if qr.Finished() && confirmations >= votesRequired {
+						goto finishConfirmation
+					}
+
 					if confirmations >= p.s.Memberlist().NumMembers() {
 						qr.Close()
 						goto finishConfirmation
 					}
+
 				case <-time.After(50 * time.Millisecond):
 					if confirmations >= p.s.Memberlist().NumMembers() {
 						qr.Close()

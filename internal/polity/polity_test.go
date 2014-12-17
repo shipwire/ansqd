@@ -3,9 +3,7 @@ package polity
 import (
 	"fmt"
 	"io/ioutil"
-	"log"
 	"math/rand"
-	"os"
 	"testing"
 
 	"github.com/bradfitz/iter"
@@ -169,7 +167,7 @@ func getAgents(t *testing.T, n int) ([]*Polity, []*agent.Agent) {
 		ag[n] = a
 		pl[n] = CreateWithAgent(a)
 		pl[n].name = names[n]
-		pl[n].Log = log.New(os.Stdout, "", 0)
+		//pl[n].Log = log.New(os.Stdout, "", 0)
 	}
 	return pl, ag
 }
