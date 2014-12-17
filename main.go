@@ -156,6 +156,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	err = ag.Start()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	p := polity.CreateWithAgent(ag)
 	a = auditor{
@@ -179,5 +183,8 @@ func main() {
 
 	n.Main()
 	<-signalChan
+	ag.Leave()
+	ag.Shutdown()
 	n.Exit()
+	<-ag.ShutdownCh()
 }

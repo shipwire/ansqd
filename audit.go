@@ -83,9 +83,9 @@ func (h *Host) InitiateRecovery() {
 	h.recoveryLock.Unlock()
 
 	role := "recover:" + h.host
-	err := a.p.RunElection(role)
+	err := <-a.p.RunElection(role)
+	defer a.p.RunRecallElection(role)
 	if err != nil {
-		a.p.RunRecallElection(role)
 		return
 	}
 
