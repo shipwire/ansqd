@@ -159,7 +159,7 @@ func (p *Polity) RunElection(role string) <-chan error {
 }
 
 func (p *Polity) runConfirmation(query, request, role string, votesRequired int) <-chan error {
-	ch := make(chan error)
+	ch := make(chan error, 1)
 	go func() {
 		for {
 		doConfirmation:
