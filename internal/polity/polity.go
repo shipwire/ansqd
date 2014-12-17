@@ -1,14 +1,15 @@
 /*
 
-Package polity implements strong consensus over a gossip-based network (serf).
+Package polity implements strong consensus, heavily inspired by raft, over a
+gossip-based network (serf).
 
 With a polity, you can run elections to elect the current node into a unique
 role. The election will broadcast to all peers that it would like to assume a role.
 If the remote node sees that role as unfilled, it will vote for the candidate and fill
 the role, otherwise it will vote no.
 
-The quorum required is (n/2)+1 where n is the maximum population known of all nodes
-that voted.
+By default, the quorum required is (n/2)+1 where n is the maximum population known of all nodes
+that voted. (This is configurable by providing a different QuorumFunc to a Polity.)
 
 A node will hold a position until it is recalled. Nodes will always vote yes to a recall,
 but a quorum must still reply for the recall to succeed.
