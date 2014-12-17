@@ -20,15 +20,25 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/serf/command/agent"
 	"github.com/hashicorp/serf/serf"
 )
 
 const (
-	electionBegin = "polity.election.begin"
+	electionBegin   = "polity.election.begin"
+	electionConfirm = "polity.election.confirm"
+	electionFailed  = "polity.election.fail"
+
 	recallBegin   = "polity.recall.begin"
+	recallConfirm = "polity.recall.confirm"
+
+	updateTime = "polity.updateTime"
+
+	query = "polity.query"
 
 	yes = "YES"
 	no  = "NO"
@@ -42,19 +52,35 @@ var (
 
 // Polity represents a distributed cluster capable of electing nodes for particular roles.
 type Polity struct {
+	name      string
 	s         *serf.Serf
 	eventCh   <-chan serf.Event
-	roles     map[string]string
+	roles     map[string]role
 	voteMutex *sync.Mutex
-	log       *log.Logger
+	Log       *log.Logger
 }
+
+type role struct {
+	node   string
+	status status
+	time   serf.LamportTime
+}
+
+type status int
+
+const (
+	invalid status = iota
+	confirmed
+	impeached
+	recalled
+)
 
 // Create initializes a polity based on a serf instance and event channel.
 func Create(s *serf.Serf, eventCh <-chan serf.Event) *Polity {
 	p := &Polity{
 		s:         s,
 		eventCh:   eventCh,
-		roles:     make(map[string]string),
+		roles:     make(map[string]role),
 		voteMutex: &sync.Mutex{},
 	}
 
@@ -67,7 +93,7 @@ func CreateWithAgent(a *agent.Agent) *Polity {
 	p := &Polity{
 		s:         a.Serf(),
 		eventCh:   eventCh,
-		roles:     make(map[string]string),
+		roles:     make(map[string]role),
 		voteMutex: &sync.Mutex{},
 	}
 
@@ -96,17 +122,13 @@ func (p *Polity) Serf() *serf.Serf {
 
 // RunElection initiates an election for role with the local node as the candidate.
 func (p *Polity) RunElection(role string) error {
-	p.voteMutex.Lock()
-	defer p.voteMutex.Unlock()
-	if _, ok := p.roles[role]; ok {
-		return ErrLostElection
-	}
-
-	p.roles[role] = "self"
 	votesRequired := 3
-	yesVotes := 1
+	yesVotes := 0
 
-	qr, err := p.s.Query(electionBegin, []byte(role), &serf.QueryParam{FilterTags: p.tags()})
+	p.logf("%s up for candidacy for role %s", p.name, role)
+
+	request := fmt.Sprintf("%s %s", p.Serf().LocalMember().Name, role)
+	qr, err := p.s.Query(electionBegin, []byte(request), &serf.QueryParam{Timeout: 60 * time.Second})
 	if err != nil {
 		return err
 	}
@@ -117,6 +139,7 @@ func (p *Polity) RunElection(role string) error {
 
 		_, err := fmt.Sscanln(string(rsp.Payload), &vote, &node, &population)
 		if err != nil {
+			p.logf("%s: error parsing response: %s: %s", p.name, err, strconv.Quote(string(rsp.Payload)))
 			continue
 		}
 
@@ -127,27 +150,35 @@ func (p *Polity) RunElection(role string) error {
 		if vote == yes {
 			yesVotes++
 		}
+
+		if yesVotes >= votesRequired {
+			qr.Close()
+		}
 	}
 
-	if yesVotes >= votesRequired {
-		return nil
+	p.logf("Received %d votes. %d required", yesVotes, votesRequired)
+
+	if yesVotes < votesRequired {
+		return ErrLostElection
 	}
 
-	return ErrLostElection
+	qr, err = p.s.Query(electionConfirm, []byte(request), nil)
+	if err != nil {
+		return err
+	}
+
+	for _ = range qr.ResponseCh() {
+	}
+
+	return nil
 }
 
 // RunRecallElection starts a vote to empty a role.
 func (p *Polity) RunRecallElection(role string) error {
-	p.voteMutex.Lock()
-	defer p.voteMutex.Unlock()
-	if _, ok := p.roles[role]; !ok {
-		return ErrRoleUnfilled
-	}
-
 	votesRequired := 3
-	yesVotes := 1
+	yesVotes := 0
 
-	qr, err := p.s.Query(recallBegin, []byte(role), &serf.QueryParam{FilterTags: p.tags()})
+	qr, err := p.s.Query(recallBegin, []byte(role), &serf.QueryParam{Timeout: 10 * time.Second})
 	if err != nil {
 		return err
 	}
@@ -158,6 +189,7 @@ func (p *Polity) RunRecallElection(role string) error {
 
 		_, err := fmt.Sscanln(string(rsp.Payload), &vote, &node, &population)
 		if err != nil {
+			p.logf("recall: %s: error parsing response: %s: %s", p.name, err, strconv.Quote(string(rsp.Payload)))
 			continue
 		}
 
@@ -168,14 +200,102 @@ func (p *Polity) RunRecallElection(role string) error {
 		if vote == yes {
 			yesVotes++
 		}
+
+		if yesVotes >= votesRequired {
+			qr.Close()
+		}
 	}
 
-	if yesVotes >= votesRequired {
-		delete(p.roles, role)
+	p.logf("Received %d votes. %d required for recall", yesVotes, votesRequired)
+
+	if yesVotes < votesRequired {
+		return ErrLostElection
+	}
+
+	qr, err = p.s.Query(recallConfirm, []byte(role), nil)
+	if err != nil {
+		return err
+	}
+
+	for _ = range qr.ResponseCh() {
+	}
+
+	return p.updateRole(role)
+}
+
+func (p *Polity) updateRole(roleString string) error {
+	r, ok := p.roles[roleString]
+	if !ok {
 		return nil
 	}
 
-	return ErrLostElection
+	payload := fmt.Sprintln(r.node, roleString, r.status)
+	return p.s.UserEvent(updateTime, []byte(payload), false)
+}
+
+func (p *Polity) QueryRole(role string) (string, error) {
+	votesRequired := 3
+
+	var (
+		answer       string
+		answerStatus status
+	)
+
+	votes := 0
+	window := &LamportWindow{}
+
+	qr, err := p.s.Query(query, []byte(role), &serf.QueryParam{Timeout: 10 * time.Second})
+	if err != nil {
+		return "", err
+	}
+
+	for rsp := range qr.ResponseCh() {
+		var node string
+		var population int
+		var status status
+		var time serf.LamportTime
+
+		_, err := fmt.Sscanln(string(rsp.Payload), &node, &status, &time, &population)
+		if err != nil {
+			p.logf("query: %s: error parsing response: %s: %s", p.name, err, strconv.Quote(string(rsp.Payload)))
+			continue
+		}
+
+		if newVotesRequired := (population / 2) + 1; newVotesRequired > votesRequired {
+			votesRequired = newVotesRequired
+		}
+
+		if node == "-" {
+			// this response is *really* old. disregard
+			continue
+		}
+
+		if node != answer && window.Before(time) {
+			// this response is old. disregard
+			continue
+		}
+
+		if (status != answerStatus || node != answer) && window.After(time) {
+			// this response is newer than what we knew. use it instead
+			votes = 1
+			window = &LamportWindow{}
+			window.Witness(time)
+			answer = node
+			answerStatus = status
+		}
+
+		if node == answer {
+			// this response is what we know already
+			votes++
+			window.Witness(time)
+		}
+
+		if votes >= votesRequired {
+			return node, nil
+		}
+	}
+
+	return "", ErrLostElection
 }
 
 func (p *Polity) voteLoop() {
@@ -194,51 +314,148 @@ func (p *Polity) handleEvent(e serf.Event) {
 	case *serf.Query:
 		switch evt.Name {
 		case electionBegin:
+			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
 			p.vote(evt)
 		case recallBegin:
+			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
 			p.voteRecall(evt)
+		case query:
+			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
+			p.query(evt)
+		case electionConfirm:
+			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
+			p.confirmElection(evt)
+		case recallConfirm:
+			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
+			p.confirmRecall(evt)
+		}
+	case serf.UserEvent:
+		switch evt.Name {
+		case updateTime:
+			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
+			p.updateTime(evt)
 		}
 	}
 }
 
 func (p *Polity) voteRecall(q *serf.Query) {
 	var err error
-	role := string(q.Payload)
+	r := string(q.Payload)
 
 	p.voteMutex.Lock()
 	defer p.voteMutex.Unlock()
 
-	if existing, ok := p.roles[role]; ok {
-		err = q.Respond([]byte(fmt.Sprint("YES", existing, len(p.s.Members()))))
+	if existing, ok := p.roles[r]; ok {
+		existing.status = impeached
+		existing.time = q.LTime
+		p.roles[r] = existing
+		err = q.Respond([]byte(fmt.Sprintln("YES", existing.node, len(p.s.Members()))))
 	} else {
-		err = q.Respond([]byte(fmt.Sprint("YES", "-", len(p.s.Members()))))
+		err = q.Respond([]byte(fmt.Sprintln("YES", "-", len(p.s.Members()))))
 	}
 
 	if err != nil {
-		p.log.Println(err)
+		p.logf("%s: %s", p.name, err)
 	}
 
 }
 
+func (p *Polity) confirmElection(q *serf.Query) {
+	var candidate, r string
+	fmt.Sscan(string(q.Payload), &candidate, &r)
+
+	p.voteMutex.Lock()
+	defer p.voteMutex.Unlock()
+
+	p.roles[r] = role{candidate, confirmed, q.LTime}
+	q.Respond(nil)
+}
+
+func (p *Polity) confirmRecall(q *serf.Query) {
+	r := string(q.Payload)
+
+	p.voteMutex.Lock()
+	defer p.voteMutex.Unlock()
+
+	if existing, ok := p.roles[r]; ok {
+		existing.status = recalled
+		existing.time = q.LTime
+		p.roles[r] = existing
+	} else {
+		p.roles[r] = role{node: "-", status: recalled, time: q.LTime}
+	}
+
+	q.Respond(nil)
+}
+
+func (p *Polity) updateTime(q serf.UserEvent) {
+	var node, r string
+	var status status
+
+	_, err := fmt.Sscanln(string(q.Payload), &node, &r, &status)
+	if err != nil {
+		return
+	}
+
+	p.voteMutex.Lock()
+	defer p.voteMutex.Unlock()
+
+	if existing, ok := p.roles[r]; ok && existing.node == node && existing.status == status {
+		existing.time = q.LTime
+		p.roles[r] = existing
+	} else if !ok {
+		p.roles[r] = role{node: node, status: status, time: q.LTime}
+	}
+}
+
 func (p *Polity) vote(q *serf.Query) {
 	var err error
-	var candidate, role string
-	fmt.Sscan(string(q.Payload), &candidate, &role)
+	var candidate, r string
+	fmt.Sscan(string(q.Payload), &candidate, &r)
+
+	p.voteMutex.Lock()
+	defer p.voteMutex.Unlock()
+
+	if existing, ok := p.roles[r]; ok && !existing.status.vacant() {
+		p.logf("%s voting no", p.name)
+		err = q.Respond([]byte(fmt.Sprintln("NO", existing.node, len(p.s.Members()))))
+	} else {
+		p.logf("%s voting yes on candidate %s for role %s", p.name, candidate, strconv.Quote(r))
+		err = q.Respond([]byte(fmt.Sprintln("YES", candidate, len(p.s.Members()))))
+	}
+
+	if err != nil {
+		p.logf("%s", err)
+	}
+}
+
+func (s status) vacant() bool {
+	return !(s == confirmed || s == impeached)
+}
+
+func (p *Polity) query(q *serf.Query) {
+	var err error
+	var role string
+	fmt.Sscan(string(q.Payload), &role)
 
 	p.voteMutex.Lock()
 	defer p.voteMutex.Unlock()
 
 	if existing, ok := p.roles[role]; ok {
-		err = q.Respond([]byte(fmt.Sprint("NO", existing, len(p.s.Members()))))
+		err = q.Respond([]byte(fmt.Sprintln(existing.node, existing.status, existing.time, len(p.s.Members()))))
 	} else {
-		p.roles[role] = candidate
-		err = q.Respond([]byte(fmt.Sprint("YES", candidate, len(p.s.Members()))))
+		err = q.Respond([]byte(fmt.Sprintln("-", invalid, q.LTime, len(p.s.Members()))))
 	}
 
 	if err != nil {
-		p.log.Println(err)
+		p.logf("%s", err)
 	}
+}
 
+func (p *Polity) logf(f string, i ...interface{}) {
+	if p.Log != nil {
+		p.Log.Printf(f, i...)
+	}
 }
 
 func (p *Polity) tags() map[string]string {
