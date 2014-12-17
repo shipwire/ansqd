@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/serf/serf"
 )
 
+// QueryRole submits a query to the cluster asking which node, if any, has a particular role.
 func (p *Polity) QueryRole(role string) (string, error) {
 	votesRequired := 3
 
