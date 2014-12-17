@@ -120,20 +120,22 @@ func (p *Polity) RunElection(role string) <-chan error {
 	p.logf("%s running for role %s", p.name, role)
 
 	request := fmt.Sprintf("%s %s", p.Serf().LocalMember().Name, role)
-	qr, err := p.s.Query(electionBegin, []byte(request), &serf.QueryParam{Timeout: 15 * time.Second})
+	qr, err := p.s.Query(electionBegin, []byte(request), &serf.QueryParam{Timeout: 5 * time.Second})
 	if err != nil {
 		return errChan(err)
 	}
 
 	for rsp := range qr.ResponseCh() {
 		var vote, node string
-		var population int
+		population := p.s.Memberlist().NumMembers()
 
-		_, err := fmt.Sscanln(string(rsp.Payload), &vote, &node, &population)
+		_, err := fmt.Sscanln(string(rsp.Payload), &vote, &node)
 		if err != nil {
 			p.logf("%s: error parsing response: %s: %s", p.name, err, strconv.Quote(string(rsp.Payload)))
 			continue
 		}
+
+		p.logf("%s: got %s vote from %s on election", p.name, vote, rsp.From)
 
 		if newVotesRequired := p.QuorumFunc(population); newVotesRequired > votesRequired {
 			votesRequired = newVotesRequired
@@ -162,7 +164,8 @@ func (p *Polity) runConfirmation(query, request, role string, votesRequired int)
 		for {
 		doConfirmation:
 			confirmations := 0
-			qr, err := p.s.Query(query, []byte(request), &serf.QueryParam{Timeout: 1 * time.Minute})
+
+			qr, err := p.s.Query(query, []byte(request), &serf.QueryParam{Timeout: 15 * time.Second})
 			if err != nil {
 				ch <- err
 				close(ch)
@@ -176,19 +179,31 @@ func (p *Polity) runConfirmation(query, request, role string, votesRequired int)
 					close(ch)
 					return
 				case rsp := <-qr.ResponseCh():
-					confirmations++
-					p.logf("%s confirmed %s", rsp.From, query)
-					if confirmations >= votesRequired {
-						ch <- p.updateRole(role)
-						close(ch)
-						return
+					if rsp.From != "" {
+						confirmations++
+						p.logf("%s: %s confirmed %s", p.name, rsp.From, query)
+					}
+
+					if confirmations >= p.s.Memberlist().NumMembers() {
+						qr.Close()
+						goto finishConfirmation
 					}
 				case <-time.After(50 * time.Millisecond):
-					if qr.Finished() {
+					if confirmations >= p.s.Memberlist().NumMembers() {
+						qr.Close()
+						goto finishConfirmation
+					}
+					if qr.Finished() && confirmations >= votesRequired {
+						goto finishConfirmation
+					} else if qr.Finished() {
 						goto doConfirmation
 					}
 				}
 			}
+		finishConfirmation:
+			ch <- p.updateRole(role)
+			close(ch)
+			return
 		}
 	}()
 
@@ -207,16 +222,16 @@ func (p *Polity) RunRecallElection(role string) <-chan error {
 	votesRequired := 3
 	yesVotes := 0
 
-	qr, err := p.s.Query(recallBegin, []byte(role), &serf.QueryParam{Timeout: 10 * time.Second})
+	qr, err := p.s.Query(recallBegin, []byte(role), &serf.QueryParam{Timeout: 5 * time.Second})
 	if err != nil {
 		return errChan(err)
 	}
 
 	for rsp := range qr.ResponseCh() {
 		var vote, node string
-		var population int
+		population := p.s.Memberlist().NumMembers()
 
-		_, err := fmt.Sscanln(string(rsp.Payload), &vote, &node, &population)
+		_, err := fmt.Sscanln(string(rsp.Payload), &vote, &node)
 		if err != nil {
 			p.logf("recall: %s: error parsing response: %s: %s", p.name, err, strconv.Quote(string(rsp.Payload)))
 			continue
@@ -250,7 +265,7 @@ func (p *Polity) updateRole(roleString string) error {
 		return nil
 	}
 
-	payload := fmt.Sprintln(r.node, roleString, r.status)
+	payload := fmt.Sprintf("%s %s %d", r.node, roleString, r.status)
 	return p.s.UserEvent(updateTime, []byte(payload), false)
 }
 
@@ -270,25 +285,19 @@ func (p *Polity) handleEvent(e serf.Event) {
 	case *serf.Query:
 		switch evt.Name {
 		case electionBegin:
-			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
 			p.vote(evt)
 		case recallBegin:
-			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
 			p.voteRecall(evt)
 		case query:
-			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
 			p.query(evt)
 		case electionConfirm:
-			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
 			p.confirmElection(evt)
 		case recallConfirm:
-			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
 			p.confirmRecall(evt)
 		}
 	case serf.UserEvent:
 		switch evt.Name {
 		case updateTime:
-			p.logf("%d: %s: received event: %s", evt.LTime, p.name, evt.String())
 			p.updateTime(evt)
 		}
 	}
@@ -300,6 +309,7 @@ func (p *Polity) updateTime(q serf.UserEvent) {
 
 	_, err := fmt.Sscanln(string(q.Payload), &node, &r, &status)
 	if err != nil {
+		p.logf("%s: error parsing response: %s: %s", p.name, err, strconv.Quote(string(q.Payload)))
 		return
 	}
 

@@ -26,11 +26,11 @@ func (p *Polity) QueryRole(role string) (string, error) {
 
 	for rsp := range qr.ResponseCh() {
 		var node string
-		var population int
 		var status status
 		var time serf.LamportTime
+		population := p.s.Memberlist().NumMembers()
 
-		_, err := fmt.Sscanln(string(rsp.Payload), &node, &status, &time, &population)
+		_, err := fmt.Sscanln(string(rsp.Payload), &node, &status, &time)
 		if err != nil {
 			p.logf("query: %s: error parsing response: %s: %s", p.name, err, strconv.Quote(string(rsp.Payload)))
 			continue

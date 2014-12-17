@@ -2,7 +2,6 @@ package polity
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/hashicorp/serf/serf"
 )
@@ -23,6 +22,20 @@ const (
 	recalled
 )
 
+func (s status) String() string {
+	switch s {
+	case confirmed:
+		return "confirmed"
+	case running:
+		return "running"
+	case impeached:
+		return "impeached"
+	case recalled:
+		return "recalled"
+	}
+	return "invalid"
+}
+
 func (s status) vacant() bool {
 	return s == invalid || s == recalled
 }
@@ -39,9 +52,9 @@ func (s status) eq(other status) bool {
 
 func (s status) confirmed(other status) bool {
 	switch s {
-	case impeached:
+	case impeached, recalled:
 		return other == recalled
-	case running:
+	case running, confirmed:
 		return other == confirmed
 	}
 	return false
@@ -55,12 +68,14 @@ func (p *Polity) vote(q *serf.Query) {
 	p.voteMutex.Lock()
 	defer p.voteMutex.Unlock()
 
-	if existing, ok := p.roles[r]; ok && !existing.status.vacant() {
-		p.logf("%s voting no", p.name)
-		err = q.Respond([]byte(fmt.Sprintln("NO", existing.node, len(p.s.Members()))))
+	if existing, ok := p.roles[r]; ok && existing.status == confirmed && existing.node == candidate {
+		err = q.Respond([]byte(fmt.Sprintln("YES", candidate)))
+		p.roles[r] = role{candidate, running, q.LTime}
+	} else if ok && !existing.status.vacant() {
+		err = q.Respond([]byte(fmt.Sprintln("NO", existing.node)))
+		p.logf("%s: voting NO on %s for %s because %s has role with status %s", p.name, candidate, r, existing.node, existing.status)
 	} else {
-		p.logf("%s voting yes on candidate %s for role %s", p.name, candidate, strconv.Quote(r))
-		err = q.Respond([]byte(fmt.Sprintln("YES", candidate, len(p.s.Members()))))
+		err = q.Respond([]byte(fmt.Sprintln("YES", candidate)))
 		p.roles[r] = role{candidate, running, q.LTime}
 	}
 
@@ -92,12 +107,12 @@ func (p *Polity) voteRecall(q *serf.Query) {
 	defer p.voteMutex.Unlock()
 
 	if existing, ok := p.roles[r]; ok {
-		err = q.Respond([]byte(fmt.Sprintln("YES", existing.node, len(p.s.Members()))))
+		err = q.Respond([]byte(fmt.Sprintln("YES", existing.node)))
 		existing.status = impeached
 		existing.time = q.LTime
 		p.roles[r] = existing
 	} else {
-		err = q.Respond([]byte(fmt.Sprintln("YES", "-", len(p.s.Members()))))
+		err = q.Respond([]byte(fmt.Sprintln("YES", "-")))
 	}
 
 	if err != nil {
@@ -116,8 +131,6 @@ func (p *Polity) confirmRecall(q *serf.Query) {
 		existing.status = recalled
 		existing.time = q.LTime
 		p.roles[r] = existing
-	} else {
-		p.roles[r] = role{node: "-", status: recalled, time: q.LTime}
 	}
 
 	q.Respond(nil)
@@ -132,9 +145,9 @@ func (p *Polity) query(q *serf.Query) {
 	defer p.voteMutex.Unlock()
 
 	if existing, ok := p.roles[role]; ok {
-		err = q.Respond([]byte(fmt.Sprintln(existing.node, existing.status, existing.time, len(p.s.Members()))))
+		err = q.Respond([]byte(fmt.Sprintf("%s %d %d", existing.node, existing.status, existing.time)))
 	} else {
-		err = q.Respond([]byte(fmt.Sprintln("-", invalid, q.LTime, len(p.s.Members()))))
+		err = q.Respond([]byte(fmt.Sprintln("-", invalid, q.LTime)))
 	}
 
 	if err != nil {

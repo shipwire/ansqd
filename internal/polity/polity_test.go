@@ -108,7 +108,7 @@ func TestPolityWithFailures(t *testing.T) {
 	for _, n := range shutdown {
 		agents[n].Shutdown()
 		<-agents[n].ShutdownCh()
-		fmt.Println("Shutting down node", polities[n].name)
+		polities[n].logf("Shutting down node %s", polities[n].name)
 	}
 
 	err = <-polities[next].RunElection("leader")
@@ -169,7 +169,7 @@ func getAgents(t *testing.T, n int) ([]*Polity, []*agent.Agent) {
 		ag[n] = a
 		pl[n] = CreateWithAgent(a)
 		pl[n].name = names[n]
-		pl[n].Log = log.New(os.Stderr, "", 0)
+		pl[n].Log = log.New(os.Stdout, "", 0)
 	}
 	return pl, ag
 }
