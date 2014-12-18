@@ -4,7 +4,7 @@ package polity
 type QuorumFunc func(population int) (votesRequired int)
 
 // SimpleMajority is a QuorumFunc that requires 50% + 1 nodes, with a minimum of 3.
-var SimpleMajority QuorumFunc = QuorumPercentage(.5, 3)
+var SimpleMajority = QuorumPercentage(.5, 3)
 
 // QuorumPercentage creates a QuorumFunc requires a minimum percentage of votes equal to or above a
 // minimum number of votes.

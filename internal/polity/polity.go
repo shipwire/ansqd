@@ -79,6 +79,8 @@ func Create(s *serf.Serf, eventCh <-chan serf.Event) *Polity {
 	return p
 }
 
+// CreateWithAgent initializes a polity based on a serf.Agent. The polity
+// will register a handler to receive events.
 func CreateWithAgent(a *agent.Agent) *Polity {
 	eventCh := make(chan serf.Event, 10)
 	p := &Polity{
